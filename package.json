@@ -1,0 +1,44 @@
+{
+  "name": "strata",
+  "version": "0.1.0",
+  "description": "A modular TypeScript runtime and CLI for AI-assisted development",
+  "type": "module",
+  "bin": {
+    "strata": "./dist/cli/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "ARCHITECTURE.md"
+  ],
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "start": "tsx src/cli/index.ts",
+    "dev": "tsx watch src/cli/index.ts",
+    "typecheck": "tsc --project tsconfig.test.json",
+    "test": "tsx --test tests/core/agent.test.ts tests/cli/args.test.ts tests/permissions/manager.test.ts tests/providers/anthropic.test.ts tests/providers/openai.test.ts tests/tools/builtin.test.ts",
+    "test:package": "node --test tests/package.test.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "openai": "^7.10.0",
+    "picocolors": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
