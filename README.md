@@ -175,9 +175,10 @@ The CLI exits with an error and retains its session lock in this situation.
 | `npm run dev` | Restart the source CLI on changes |
 
 [CI](.github/workflows/ci.yml) is configured for Linux and Windows on Node 20
-and 24. That configuration is not a claim that the current revision has passed
-CI. Keep usage, architecture, session, extension, and security documentation
-in step with changes to their owning contracts.
+and 24. The V1 runtime milestone passed all four environments; see
+[docs/V1.md](docs/V1.md) for the verified revision and run. Keep usage,
+architecture, session, extension, and security documentation in step with
+changes to their owning contracts.
 
 ## License
 
