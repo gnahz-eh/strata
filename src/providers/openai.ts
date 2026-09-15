@@ -6,7 +6,7 @@ import type {
   ChatCompletionMessageParam,
 } from "openai/resources/chat/completions";
 
-import type { ModelClient, Message, MessageParam, ToolResultBlockParam } from "../core/client.js";
+import type { CompletionOptions, ModelClient, Message, MessageParam, ToolResultBlockParam } from "../core/client.js";
 import type { Tool } from "../core/tool.js";
 
 export const DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
@@ -135,10 +135,10 @@ export class OpenAIClient implements ModelClient {
     public readonly maxTokens: number = DEFAULT_OPENAI_MAX_TOKENS,
     options: ClientOptions = {},
   ) {
-    this.client = new OpenAI(options);
+    this.client = new OpenAI({ timeout: 120_000, maxRetries: 2, ...options });
   }
 
-  async complete(messages: MessageParam[], system: string, tools: Tool[]): Promise<Message> {
+  async complete(messages: MessageParam[], system: string, tools: Tool[], options: CompletionOptions = {}): Promise<Message> {
     const stream = this.client.chat.completions.stream({
       model: this.model,
       max_completion_tokens: this.maxTokens,
@@ -146,13 +146,12 @@ export class OpenAIClient implements ModelClient {
       ...(tools.length > 0 ? { tools: tools.map(toOpenAITool) } : {}),
       stream_options: { include_usage: true },
       store: false,
-    });
+    }, { signal: options.signal });
 
-    stream.on("content", (delta) => process.stdout.write(delta));
-    stream.on("refusal.delta", ({ delta }) => process.stdout.write(delta));
+    stream.on("content", (delta) => options.onText?.(delta));
+    stream.on("refusal.delta", ({ delta }) => options.onText?.(delta));
 
     const completion = await stream.finalChatCompletion();
-    process.stdout.write("\n");
     return fromOpenAICompletion(completion);
   }
 }

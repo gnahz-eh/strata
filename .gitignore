@@ -1,6 +1,9 @@
 node_modules/
 dist/
 coverage/
+.strata/
+*.session.json
+*.session.json.lock
 .env
 .env.*
 !.env.example

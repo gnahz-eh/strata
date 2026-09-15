@@ -1,7 +1,6 @@
 import { platform } from "node:os";
 
-export function buildSystemPrompt(): string {
-  const cwd = process.cwd();
+export function buildSystemPrompt(cwd: string = process.cwd()): string {
   const today = new Date().toISOString().slice(0, 10);
   return [
     "You are Strata, a coding assistant that runs in the user's terminal.",

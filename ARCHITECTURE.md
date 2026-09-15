@@ -1,357 +1,173 @@
-# Strata architecture
+# Strata Architecture
 
-A walkthrough designed to be read alongside the source. Each section maps a
-Strata concept back to its full-fat equivalent in claude-code, so you
-can use this repo as a launchpad into the real codebase.
+Strata v1 is a TypeScript runtime and CLI for a single agent using text and
+tools. It keeps transport, execution, approval, persistence, extensions, and
+presentation separate. It is intended for trusted local execution, not as an
+isolation boundary for hostile code. See [README.md](README.md) for usage.
 
-The implementation is TypeScript-only. References to claude-code below are
-conceptual reading pointers, not verified paths for its current version.
+Related guides: [SECURITY.md](SECURITY.md),
+[docs/extensions.md](docs/extensions.md), and [docs/sessions.md](docs/sessions.md).
 
-## Repository boundaries
+## Ownership
 
-| Location | Responsibility |
+| Owner | Responsibility |
 |---|---|
-| [src/core/agent.ts](src/core/agent.ts) | Conversation state, loop, and lifecycle events |
-| [src/core/client.ts](src/core/client.ts) | `ModelClient` contract and message types |
-| [src/core/permissions.ts](src/core/permissions.ts) | `PermissionPolicy` and decision contracts |
-| [src/core/tool.ts](src/core/tool.ts) | Tool definition and object input schema type |
-| [src/providers/anthropic.ts](src/providers/anthropic.ts) | Anthropic transport, streaming, and wire schema conversion |
-| [src/providers/openai.ts](src/providers/openai.ts) | OpenAI Chat Completions streaming and message/tool conversion |
-| [src/providers/index.ts](src/providers/index.ts) | Provider registry, defaults, key names, and client factory |
-| [src/permissions/manager.ts](src/permissions/manager.ts) | Approval modes, terminal prompts, and session allowlist |
-| [src/context/system-prompt.ts](src/context/system-prompt.ts) | System prompt construction |
-| [src/tools/index.ts](src/tools/index.ts) | Built-in tools and registration |
-| [src/cli/main.ts](src/cli/main.ts) | Compose concrete dependencies and run the CLI |
-| [src/index.ts](src/index.ts) | Public library exports without starting the CLI |
+| [src/core/client.ts](src/core/client.ts) | Provider-neutral text/tool messages and `ModelClient` |
+| [src/core/agent.ts](src/core/agent.ts) | Private history, schema validation, budgets, serial tool execution, checkpoints, events |
+| [src/core/history.ts](src/core/history.ts) | History validation and interrupted-result representation |
+| [src/core/abort.ts](src/core/abort.ts), [src/core/stream.ts](src/core/stream.ts) | Deadlines, cancellation, and callback-to-event streaming |
+| [src/core/tool.ts](src/core/tool.ts), [src/core/permissions.ts](src/core/permissions.ts) | Tool and approval contracts |
+| [src/providers/index.ts](src/providers/index.ts) | Provider selection; adapters own SDK and wire-format conversion |
+| [src/permissions/manager.ts](src/permissions/manager.ts) | Approval modes and tool-name allowlist, with an injected prompt callback |
+| [src/tools/index.ts](src/tools/index.ts) | Built-in `read`, `write`, `glob`, and `bash` tools |
+| [src/extensions/index.ts](src/extensions/index.ts) | Explicit trusted-local extension loading and tool registration |
+| [src/sessions/index.ts](src/sessions/index.ts) | Opt-in file-session lifecycle |
+| [src/cli/main.ts](src/cli/main.ts), [src/cli/render.ts](src/cli/render.ts) | Composition, terminal interaction, and text/JSON rendering |
+| [src/index.ts](src/index.ts) | Public library exports |
 
-The core depends on interfaces, not the concrete provider clients or terminal
-permission manager. Adapters and tools depend on core contracts. The CLI
-assembles these implementations; core modules never import the CLI or the
-public barrel. The shared message types still use Anthropic's protocol types.
-The OpenAI adapter translates to and from that shape, keeping the agent loop
-unchanged. Supporting two providers does not yet make the shared message
-schema provider-neutral.
+Core code depends on its contracts, not the CLI, concrete providers, extension
+loader, or session store. Message types are defined in core with no Anthropic
+import. The familiar `tool_use`/`tool_result` names are an internal text/tool
+protocol; adapters translate it to their provider's wire format.
 
-## 1. The shape of an agent
+## Model Boundary
 
-An LLM agent is a `while` loop that alternates between two things:
-
-1. Ask the model for the next action.
-2. Take that action (run a tool), then go back to step 1.
-
-It stops whenever `stop_reason !== "tool_use"`. This includes normal
-`end_turn` completion, but also output limits such as `max_tokens`; the
-current loop does not automatically recover from those limits.
-
-That's the whole idea. Every line in Strata exists to support that loop,
-and every "advanced" feature in claude-code (compaction, sub-agents, caching,
-recovery, hooks) is an optimization or robustness layer wrapped around the
-same loop.
-
-## 2. The async-generator pattern
-
-`Agent.query()` is an `async function*`. It `yield`s a stream of events
-(`assistant`, `toolCall`, `toolResult`, `end`). The REPL consumes those
-events with `for await (const event of agent.query(...))` and renders them.
-
-```
-user input ──► Agent.query() ──► events ──► REPL renders
-                  │
-                  ▼
-              messages[] (mutated in place)
-```
-
-Why generators? Three reasons:
-
-1. **Streaming UI**. The renderer shows progress as the agent works,
-   instead of a blank screen until everything is done.
-2. **Consumer control**. The consumer can stop requesting events. This
-  alone does not cancel model requests or subprocesses, and stopping
-  between tool events can leave incomplete history.
-3. **Composability**. The same generator can be piped into a CLI, a web
-   UI, an SDK, or another agent (claude-code's sub-agent tool literally
-   instantiates a second `QueryEngine` and forwards its events).
-
-Claude-code: `src/QueryEngine.ts:submitMessage()` returns
-`AsyncGenerator<SDKMessage>`. Same idea, more event types.
-
-Text deltas are currently printed directly by each provider adapter, not
-yielded by `Agent.query()`. The generator exposes completed assistant messages
-and tool lifecycle events. Replacing the default client is necessary for
-fully custom streaming output until a text-event contract is added.
-
-## 3. The Tool contract
-
-Defined in [src/core/tool.ts](src/core/tool.ts).
-
-A tool is a record: a JSON-schema for its inputs, a description for the
-model, and an `async` function that takes the parsed input and returns a
-string. Each provider request includes descriptors for the registered tools.
+`ModelClient` completes a request with a structured `Message` and may deliver
+incremental text through the optional callback:
 
 ```typescript
-import { readFile } from "node:fs/promises";
-import type { Tool } from "strata";
-
-interface ReadInput {
-  path: string;
-}
-
-export const readTool: Tool = {
-  name: "read",
-  description: "Read a text file before changing it.",
-  inputSchema: {
-    type: "object",
-    properties: { path: { type: "string" } },
-    required: ["path"],
-  },
-  needsPermission: false,
-  run: async (input: ReadInput) => readFile(input.path, "utf8"),
-};
+complete(
+  messages: MessageParam[],
+  system: string,
+  tools: Tool[],
+  options?: { signal?: AbortSignal; onText?: (delta: string) => void },
+): Promise<Message>;
 ```
 
-The current `Tool` interface is not generic. Implementations can type their
-own input, but the registry erases it to `any`. `ToolInputSchema` requires
-`type: "object"` so the descriptor matches the Anthropic SDK's input schema
-contract. Neither TypeScript annotations nor this schema validate model
-arguments at runtime; that remains a separate hardening task.
+`Agent.query()` exposes `textDelta`, `assistant`, `toolCall`, `toolResult`, and
+`end` events. Consumers own presentation. A completed `assistant` includes
+the text already streamed as deltas; rendering both duplicates that text.
 
-That's literally it. Claude-code's `Tool` interface adds: input validation,
-permission previews, side-effect classification, concurrency safety,
-streaming progress, custom render components, idempotency hints. Useful at
-scale, irrelevant for learning the loop.
+## Adapters And Presentation
 
-## 4. The loop
+[Client](src/providers/anthropic.ts) remains the Anthropic Messages adapter;
+[OpenAIClient](src/providers/openai.ts) uses Chat Completions, not Responses.
+Both return core messages and deliver text through `onText`, without printing.
+Public library imports are quiet. The CLI's `createRenderer` owns text and
+JSONL rendering, including completed-text fallback for clients without deltas.
 
-Implemented in [src/core/agent.ts](src/core/agent.ts), using the injected
-`ModelClient` and `PermissionPolicy` contracts.
+Both SDK clients default to `maxRetries: 2`: up to two retries after the initial
+request for eligible failures, not a two-attempt ceiling. Library constructor
+SDK options can override this setting. There is no automatic provider fallback
+or application-level tool retry.
 
-The whole loop, annotated:
+`PermissionManager` has no terminal dependency. It implements `ask`, `accept`,
+and `deny` using an optional injected prompt callback; `ask` fails closed without
+one. Only explicit `needsPermission: false` bypasses its approval requirement.
+The CLI supplies terminal interaction and filters the read-only tool set.
 
-```typescript
-async *query(userInput: string): AsyncGenerator<Event> {
-  this.messages.push({ role: "user", content: userInput });
+## Built-In Tools
 
-  while (true) {
-    // 1. Model call through the injected client; returns the final Message.
-    const response = await this.client.complete(this.messages, this.systemPrompt, this.tools);
-    this.messages.push({ role: "assistant", content: response.content });
-    yield { kind: "assistant", message: response };
+| Tool | Approval | Behavior |
+|---|---|---|
+| [read](src/tools/read.ts) | No | Regular files, strict UTF-8, at most 1 MiB before paging; zero-based offset, up to 2000 lines with one-based labels |
+| [write](src/tools/write.ts) | Yes | Full-file replacement with a same-directory temporary file and atomic rename; creates parents and rejects a symlink target |
+| [glob](src/tools/glob.ts) | No | `fast-glob` patterns including recursive `**`, files only, up to 200 results, no symlink traversal; skips dependency/generated directories, `.git`, and `.strata` |
+| [bash](src/tools/bash.ts) | Yes | `cmd.exe` on Windows, `/bin/bash` elsewhere; workspace cwd, bounded combined output, default 60-second tool input timeout, maximum 120 seconds |
 
-    // 2. Stop?
-    if (response.stop_reason !== "tool_use") {
-      yield { kind: "end", stopReason: response.stop_reason };
-      return;
-    }
+File tools check paths against the real workspace via
+[src/tools/shared.ts](src/tools/shared.ts). Shell commands and trusted extension
+code are not confined by these checks. Cancellation attempts shell process-tree
+cleanup; detached or escaped processes may survive. Output is byte-bounded,
+but neither path checks nor timers are adversarial isolation.
 
-    // 3. Run each tool_use block: permission check → run → record result.
-    const toolResults: ToolResultBlockParam[] = [];
-    for (const block of response.content) {
-      if (block.type !== "tool_use") continue;
-      yield { kind: "toolCall", name: block.name, input: block.input, toolUseId: block.id };
+## Execution And Checkpoints
 
-      const { output, isError } = await this.runOne(block.name, block.input);
-      yield { kind: "toolResult", toolUseId: block.id, name: block.name, output, isError };
+1. Reject concurrent queries, empty prompts, and invalid configuration. Append
+   the user prompt to private history and invoke the optional checkpoint.
+2. Before each model call, check turn, serialized-context-byte, and reported
+   token budgets. Apply request and whole-run deadlines while streaming text.
+3. Validate the completed response and account for its reported token usage.
+   Append the assistant message and one following user message containing a
+   placeholder result for every tool call. Checkpoint this paired history
+   **before** yielding `assistant` or allowing tool effects.
+4. If the batch exceeds its call limit, record errors for all calls and execute
+   none. Otherwise, process calls serially: yield `toolCall`, validate input,
+   request permission, and run the tool with workspace, signal, and output budget.
+5. Replace each placeholder with the actual result and checkpoint **before**
+   yielding its `toolResult`. Unknown tools, invalid inputs, denials, and tool
+   failures produce error results. Invalid inputs never reach the approval gate.
+6. Continue with the paired history, or emit `end` for completion or a runtime
+   limit. Non-tool stop reasons, including `max_tokens`, do not trigger automatic
+   recovery. Provider, protocol, or checkpoint failures may throw instead of
+   emitting a normal `end` event.
 
-      toolResults.push({ type: "tool_result", tool_use_id: block.id, content: output, is_error: isError });
-    }
+AJV compiles synchronous schemas in strict mode at registration. Duplicate tool names are
+rejected; input validation does not coerce types or fill defaults. The agent
+copies registered schemas and exposes copies through `tools` and `messages`;
+callers cannot mutate its history through those accessors.
 
-    // 4. Feed results back as the next user turn, loop.
-    this.messages.push({ role: "user", content: toolResults });
-  }
-}
-```
+The placeholder means **outcome unknown**, not that a tool definitely did or
+did not run. Consumer exit and cancellation retain tool-call/result pairing.
+Neither paired history nor atomic snapshot replacement makes an external side
+effect transactional: a process can stop after an effect but before its result
+is saved. No tool is automatically replayed or retried. Inspect uncertain
+effects before submitting another prompt.
 
-The **protocol contract**: every `tool_use` block in an assistant message
-*must* be answered by a matching `tool_result` block in the next user
-message — and they go together in a single user turn, not one per turn.
-Forget this and the API rejects your next request with a 400.
+Checkpoints receive history copies. Without a checkpoint callback, history is
+memory-only. The session store owns disk writes and locks; the core pins its
+workspace via realpath but does not choose a persistence backend. A checkpoint
+failure blocks subsequent queries until the session is reopened. Required
+checkpoints finish before the terminal event; there is no save after `end`.
 
-This is the internal history format and the Anthropic wire format. OpenAI's
-wire format differs: the adapter emits one assistant `tool_calls` array and
-one `role: "tool"` message per result, preserving the matching call IDs.
+## Default Limits
 
-Compare with `src/query.ts:queryLoop()` (~1700 lines). The extra mass is:
+These are the exported `DEFAULT_LIMITS` in [src/core/agent.ts](src/core/agent.ts).
+Library callers can override them through `AgentOptions.limits`; values must
+be positive safe integers no greater than 2147483647, and the tool-output
+budget must be at least 128 bytes. Unknown limit names are rejected, including
+when callers use plain JavaScript rather than TypeScript.
 
-| Concern | Where in claude-code |
-|---|---|
-| 4-phase compaction (snip / microcompact / collapse / autocompact) | `query.ts:453-543`, `services/compact/` |
-| Recovery branches (PTL, max-tokens, fallback model, abort) | `query.ts:1062-1256` |
-| Cache-control marker stability | `services/api/claude.ts:3078-3181` |
-| Tool-call concurrency partitioning | `services/tools/toolOrchestration.ts:91-116` |
-| Stop hooks | `query.ts:1267-1306`, `query/stopHooks.ts` |
-| Token budget enforcement | `query.ts:1308-1355` |
-| Memory prefetch | `query.ts:1599-1614` |
-| Cost accounting | `cost-tracker.ts` |
+| Setting | Default | Scope |
+|---|---|---|
+| `maxTurns` | 20 | Model calls per query |
+| `maxContextBytes` | 256000 | Serialized system prompt, history, and tool descriptors; also bounds responses |
+| `maxToolOutputBytes` | 30000 | Retained output per tool result |
+| `maxToolCallsPerTurn` | 16 | Calls in one assistant response |
+| `maxRunTokens` | 100000 | Reported input plus output tokens per query |
+| `requestTimeoutMs` | 120000 | One model request |
+| `toolTimeoutMs` | 120000 | Approval and execution for one tool call |
+| `runTimeoutMs` | 900000 | Whole query |
 
-Strata does not implement those layers. Small tasks can still encounter
-these failure modes; the simpler loop is not a reliability guarantee.
+The context limit measures bytes, not a model's actual token window. There is
+no automatic compaction. Token accounting uses provider-reported usage and
+checks the total before the next model call, so it can overshoot by one
+response. It is not a hard billing cap and does not account for all possible
+provider-side work or retries.
 
-## 5. The permission gate
+## Cancellation And Trust
 
-The policy contract lives in [src/core/permissions.ts](src/core/permissions.ts).
-The default interactive implementation is [src/permissions/manager.ts](src/permissions/manager.ts).
+Use `agent.abort()` or `agent.query(prompt, { signal })` to request cancellation.
+Signals propagate to model requests, approval, and tools. Deadlines bound
+cooperative work; they cannot terminate arbitrary JavaScript or prevent it
+from blocking the event loop.
 
-Tools that mutate the world (`bash`, `write`) have `needsPermission: true`.
-Read-only tools (`read`, `glob`) don't. In `ask` mode the user is prompted
-for each mutating call with `[y]es / [n]o / [a]lways`; `always` adds the
-tool name to a session-level allowlist.
+A tool still running after cancellation gets up to a two-second settling
+grace period. Pending model, permission, and tool promises are tracked; new
+queries are refused until they settle. After draining or closing the query,
+embedders can inspect `hasPendingOperations` and call `waitForIdle(signal)`.
+The CLI retains its session lock and does not dispose extensions concurrently
+with pending code. Extension cleanup failure also retains the lock. Verify
+process termination before manual recovery. Cancellation and timeouts are not
+rollback, and callers must inspect possible side effects before continuing.
 
-`accept` approves permission-requiring tools without prompting; `deny` rejects
-them. Read-only tools bypass both modes. A custom tool that omits
-`needsPermission` also bypasses the gate. Approval is not a filesystem or
-process sandbox, and an `always` decision applies to every later input for
-the same tool name within that manager.
+The CLI drains stdout/stderr, records output failures as nonzero exit status,
+and permits normal Node shutdown. An unreferenced two-second fallback exit
+handles leftover trusted-code handles after draining; it does not release an
+uncertain session lock or promise that detached child processes were stopped.
 
-Claude-code: `src/hooks/toolPermission/` — a 4-way race between the user
-(`interactiveHandler.ts:233-530`), configured hooks
-(`utils/hooks.ts:executePermissionRequestHooks`), the bridge (for IDE/remote
-sessions), and an LLM classifier. Winners are claimed atomically with
-`claim()`. The rule grammar (`Bash(npm:*)`, `Read(/etc/**)`) lives in
-`utils/permissions/PermissionRule.ts`.
-
-The educational takeaway: permissions are a *policy decision before the
-side effect*. Make it explicit, make it cancelable, make it logged.
-
-## 6. The system prompt
-
-Built by [src/context/system-prompt.ts](src/context/system-prompt.ts).
-
-Just cwd + platform + date. Claude-code's `context.ts` also pulls in
-`CLAUDE.md`, git status, directory tree, ambient memories, model-specific
-instructions, and assembles them into stable cache buckets so cache hits
-survive across turns. None of that matters for learning the loop.
-
-## 7. The API clients
-
-[src/providers/anthropic.ts](src/providers/anthropic.ts) implements
-`ModelClient`. It owns the `toApiSchema()` conversion; the core tool
-contract contains no transport code.
-
-We use `client.messages.stream()`, attach a `text` listener to print live,
-then `await stream.finalMessage()` for the structured response. That's
-enough to feel responsive.
-
-[src/providers/openai.ts](src/providers/openai.ts) also implements
-`ModelClient`, using the official OpenAI SDK's
-`chat.completions.stream()` and `finalChatCompletion()`. The SDK assembles
-fragmented tool arguments before the adapter converts the final response.
-It does not execute tools; permissions and execution remain in the agent loop.
-
-The OpenAI mapping is explicit:
-
-| Shared/internal format | OpenAI Chat Completions format |
-|---|---|
-| Separate system prompt | First `system` message |
-| Assistant text and `tool_use` blocks | Assistant `content` and function `tool_calls` |
-| Batched user `tool_result` blocks | Individual `tool` messages with `tool_call_id` |
-| Tool result with `is_error: true` | Text prefixed with `Tool error:` |
-| `tool_use` stop reason | Normalized from `tool_calls` |
-| `max_tokens` stop reason | Normalized from `length`; partial tool calls are not executed |
-| `end_turn` stop reason | Normalized from `stop` |
-
-OpenAI tool descriptors use `strict: false` to retain optional arguments in
-the existing schemas. Completed function arguments are parsed as JSON objects;
-malformed JSON and non-object inputs fail before tool execution. This is not
-full schema validation. Refusals are surfaced as text; filtered responses and
-SDK request errors propagate as errors. Text and function calls are supported;
-image blocks and other unsupported content are rejected explicitly.
-
-[src/providers/index.ts](src/providers/index.ts) supplies provider-specific
-defaults and credential variable names. CLI precedence is explicit flag,
-then `STRATA_PROVIDER` / `STRATA_MODEL`, then built-in defaults.
-Anthropic remains the default, and only the selected provider's key is
-required. Library users can instantiate `Client` (Anthropic), `OpenAIClient`,
-or call `createClient(provider, model)`. Both adapters return the same core
-message shape and keep text streaming as stdout side effects.
-
-What we don't do:
-
-- **Cache control**. Claude-code places `cache_control` markers on the
-  system prompt, tools, and the last few messages, then very carefully
-  *doesn't* move them across turns — moving a marker invalidates
-  downstream cache.
-- **Retry**. We don't handle 429s, 529s, or transient network errors. The
-  SDK handles some retries; production code should add explicit backoff.
-- **Fallback model**. Claude-code can demote Opus → Sonnet → Haiku if the
-  primary is overloaded, taking care not to mix sign-required model
-  signatures.
-- **Additional provider/auth modes**. The current adapters cover Anthropic
-  Messages and OpenAI Chat Completions. There is no dedicated Responses,
-  Bedrock, Foundry, or OAuth adapter, and no automatic provider fallback.
-
-## 8. Adding a tool
-
-[src/tools/glob.ts](src/tools/glob.ts) is a reference. Four steps:
-
-1. Define your input type and an `async function run(input): Promise<string>`.
-2. Export a `Tool` literal with `name`, `description`,
-   `inputSchema`, `needsPermission`, and `run`.
-3. Add it to [src/tools/index.ts](src/tools/index.ts) so it ends up in `ALL_TOOLS`.
-4. Add a focused test under `tests/` and include it in the `test` script.
-
-The model only knows what your `description` tells it. Be concrete about
-*when* to use the tool, not just what it does — that's where the model's
-selection accuracy actually comes from.
-
-## 9. What's still missing for production
-
-The repository now has separate modules, library exports, a dependency
-lockfile, offline tests, and CI. These provide a development foundation,
-not production safety by themselves. Runtime argument validation and a
-sandbox or other explicit execution boundary are still missing.
-
-If you wanted to evolve this into a real product, the next features I'd
-add in order:
-
-1. **Cancellation propagation** — Ctrl-C should kill in-flight subprocesses,
-   not just the loop. Pass an `AbortSignal` through to tools.
-2. **Retry with backoff** — wrap `client.complete()` with exponential retry
-   on 429/529/network.
-3. **Context window guard** — track token usage, summarize old turns when
-   you cross a threshold. That's "microcompact" in claude-code.
-4. **Tool concurrency** — when the model emits N read-only tool calls in
-   one turn, run them in parallel (claude-code caps at 10).
-5. **Persistent sessions** — serialize `agent.messages` to disk so the
-   user can resume.
-6. **Sub-agents** — a tool that spawns another `Agent` with a focused
-   system prompt. A handful of lines, enormous capability gain.
-7. **MCP** — really just "tools, but loaded from an external server". The
-   tool interface doesn't change; the loader does.
-
-Keep these changes at their owning boundaries and test interrupted and
-failed paths as well as successful ones. In particular, cancellation must
-preserve tool-use/result pairing, and a tool returning an error-looking
-string is currently still treated as successful unless it throws.
-
-## 10. Reading order
-
-If you're new here, read in this order:
-
-1. [src/core/tool.ts](src/core/tool.ts) and [src/core/client.ts](src/core/client.ts)
-2. [src/core/agent.ts](src/core/agent.ts) and [tests/core/agent.test.ts](tests/core/agent.test.ts)
-3. [src/providers/anthropic.ts](src/providers/anthropic.ts), then [src/providers/openai.ts](src/providers/openai.ts)
-4. [src/permissions/manager.ts](src/permissions/manager.ts)
-5. [src/tools/read.ts](src/tools/read.ts), then [src/tools/bash.ts](src/tools/bash.ts)
-6. [src/cli/main.ts](src/cli/main.ts) and [src/index.ts](src/index.ts)
-
-Then open `claude-code/src/query.ts` and you'll recognize every concept,
-just bigger.
-
-## 11. Build and package boundaries
-
-[package.json](package.json) exposes `dist/index.js` and its declarations as
-the library API. The `strata` executable points to `dist/cli/index.js`.
-Only the CLI bootstrap invokes `main()` and exits the process. Library imports
-do not create either provider client or start a terminal session.
-
-[tsconfig.json](tsconfig.json) builds only `src/`, using Node ESM resolution
-and explicit `.js` import specifiers. [tsconfig.test.json](tsconfig.test.json)
-checks source, TypeScript tests, and examples without adding them to the
-published output. `npm test` runs the offline regressions; after
-`npm run build`, `npm run test:package` verifies compiled library imports,
-CLI help, provider-specific credential handling, and a compiled OpenAI CLI
-request against a local HTTP fixture without live model calls.
-
-Both built-in providers write streamed text to stdout, and the default
-permission manager uses terminal input in `ask` mode. Applications with a
-different UI should supply their own `ModelClient` and `PermissionPolicy`.
+Permission policy is separate from execution isolation. Filesystem checks,
+bounded output, and process cleanup reduce operational risk but do not form an
+OS sandbox. Extensions and custom tools are trusted code with host privileges.
+The v1 scope does not include automatic compaction, tool replay, parallel tool
+execution, remote extension distribution, or model fallback.

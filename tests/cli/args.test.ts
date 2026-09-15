@@ -5,8 +5,14 @@ import { parseCliArgs } from "../../src/cli/args.js";
 import { DEFAULT_MODEL } from "../../src/providers/anthropic.js";
 import { DEFAULT_OPENAI_MODEL } from "../../src/providers/openai.js";
 
+const runtimeDefaults = {
+  cwd: process.cwd(), session: undefined, json: false, readOnly: false,
+  extensions: [], trustExtensions: false, limits: {},
+};
+
 test("CLI defaults to interactive permission checks", () => {
   assert.deepEqual(parseCliArgs([], {}), {
+    ...runtimeDefaults,
     provider: "anthropic",
     model: DEFAULT_MODEL,
     mode: "ask",
@@ -17,6 +23,7 @@ test("CLI defaults to interactive permission checks", () => {
 
 test("CLI parses model, one-shot prompt, and approval mode", () => {
   assert.deepEqual(parseCliArgs(["--model", "test-model", "--accept-all", "-p", "Inspect source"], {}), {
+    ...runtimeDefaults,
     provider: "anthropic",
     model: "test-model",
     mode: "accept",
@@ -41,12 +48,27 @@ test("CLI rejects unknown options, positionals, and missing values", () => {
 
 test("CLI chooses the OpenAI default model when only the provider is specified", () => {
   assert.deepEqual(parseCliArgs(["--provider", "openai"], {}), {
+    ...runtimeDefaults,
     provider: "openai",
     model: DEFAULT_OPENAI_MODEL,
     mode: "ask",
     prompt: undefined,
     help: false,
   });
+});
+
+test("CLI validates execution budgets and explicit extension trust", () => {
+  for (const value of ["0", "-1", "NaN", "1.5", "999999999999"]) {
+    assert.throws(() => parseCliArgs(["--max-turns", value], {}));
+  }
+  assert.throws(() => parseCliArgs(["--extension", "plugin"], {}), /trust/);
+  assert.throws(() => parseCliArgs(["--read-only", "--accept-all"], {}), /cannot be combined/);
+  assert.throws(() => parseCliArgs(["--json"], {}), /requires/);
+  assert.throws(() => parseCliArgs(["-p", " "], {}), /empty/);
+  const options = parseCliArgs(["--extension", "one", "--extension", "two", "--trust-extensions", "--timeout", "5", "--max-turns", "2"], {});
+  assert.deepEqual(options.extensions, ["one", "two"]);
+  assert.deepEqual(options.limits, { maxTurns: 2, runTimeoutMs: 5000 });
+  assert.equal(parseCliArgs(["--help"], { STRATA_PROVIDER: "invalid" }).help, true);
 });
 
 test("CLI reads provider and model from the environment with command-line overrides", () => {

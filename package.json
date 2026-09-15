@@ -1,6 +1,6 @@
 {
   "name": "strata",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A modular TypeScript runtime and CLI for AI-assisted development",
   "type": "module",
   "bin": {
@@ -17,19 +17,24 @@
   "files": [
     "dist",
     "README.md",
-    "ARCHITECTURE.md"
+    "ARCHITECTURE.md",
+    "docs",
+    "SECURITY.md",
+    "examples/extensions"
   ],
   "scripts": {
     "build": "tsc --project tsconfig.json",
     "start": "tsx src/cli/index.ts",
     "dev": "tsx watch src/cli/index.ts",
     "typecheck": "tsc --project tsconfig.test.json",
-    "test": "tsx --test tests/core/agent.test.ts tests/cli/args.test.ts tests/permissions/manager.test.ts tests/providers/anthropic.test.ts tests/providers/openai.test.ts tests/tools/builtin.test.ts",
-    "test:package": "node --test tests/package.test.mjs",
+    "test": "node scripts/test.mjs",
+    "test:package": "node --test tests/package.test.mjs tests/v1.package.test.mjs",
     "prepack": "npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
+    "ajv": "^8.20.0",
+    "fast-glob": "^3.3.3",
     "openai": "^7.10.0",
     "picocolors": "^1.0.0"
   },

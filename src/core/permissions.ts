@@ -1,4 +1,4 @@
-import type { Tool } from "./tool.js";
+import type { Tool, ToolContext } from "./tool.js";
 
 export interface PermissionDecision {
   allowed: boolean;
@@ -6,5 +6,5 @@ export interface PermissionDecision {
 }
 
 export interface PermissionPolicy {
-  request(tool: Tool, input: unknown): Promise<PermissionDecision>;
+  request(tool: Tool, input: unknown, context?: ToolContext): Promise<PermissionDecision>;
 }

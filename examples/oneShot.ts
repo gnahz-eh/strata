@@ -4,17 +4,17 @@
  * Run:
  *   ANTHROPIC_API_KEY=sk-ant-... npx tsx examples/oneShot.ts
  */
-import { Agent, Client, buildSystemPrompt, PermissionManager, ALL_TOOLS } from "../src/index.js";
+import { Agent, Client, buildSystemPrompt, PermissionManager, readTool, globTool } from "../src/index.js";
 
 const agent = new Agent({
   client: new Client(),
-  tools: ALL_TOOLS,
-  // accept = no prompts. Only do this for read-only tasks or sandboxes.
-  permissions: new PermissionManager("accept"),
+  tools: [readTool, globTool],
+  permissions: new PermissionManager("deny"),
   systemPrompt: buildSystemPrompt(),
 });
 
 const prompt = "List the TypeScript files in src/ and tell me which is largest.";
 for await (const event of agent.query(prompt)) {
-  console.log(`[${event.kind}]`, event);
+  if (event.kind === "textDelta") process.stdout.write(event.text);
+  if (event.kind === "end") console.log(`\nStopped: ${event.stopReason}`);
 }

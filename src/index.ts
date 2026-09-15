@@ -1,7 +1,9 @@
-export { Agent, type AgentOptions, type Event } from "./core/agent.js";
-export type { ModelClient, Message, MessageParam } from "./core/client.js";
+export { Agent, DEFAULT_LIMITS, type AgentOptions, type Event, type RuntimeLimits, type StopReason } from "./core/agent.js";
+export type { ModelClient, Message, MessageParam, CompletionOptions } from "./core/client.js";
 export type { PermissionDecision, PermissionPolicy } from "./core/permissions.js";
-export type { Tool, ToolInputSchema } from "./core/tool.js";
+export type { Tool, ToolInputSchema, ToolContext } from "./core/tool.js";
+export { FileSession, type SessionIdentity } from "./sessions/index.js";
+export { loadExtensions, type ExtensionApi, type LoadedExtensions } from "./extensions/index.js";
 export { Client, DEFAULT_MODEL, DEFAULT_MAX_TOKENS, toApiSchema } from "./providers/anthropic.js";
 export { OpenAIClient, DEFAULT_OPENAI_MODEL, DEFAULT_OPENAI_MAX_TOKENS } from "./providers/openai.js";
 export { createClient, DEFAULT_PROVIDER, type Provider } from "./providers/index.js";

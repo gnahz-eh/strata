@@ -10,5 +10,11 @@ export interface Tool {
   description: string;
   inputSchema: ToolInputSchema;
   needsPermission?: boolean;
-  run: (input: any) => Promise<string>;
+  run: (input: any, context?: ToolContext) => Promise<string>;
+}
+
+export interface ToolContext {
+  cwd: string;
+  signal: AbortSignal;
+  maxOutputBytes: number;
 }

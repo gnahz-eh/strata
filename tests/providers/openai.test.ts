@@ -8,6 +8,7 @@ import type {
 } from "openai/resources/chat/completions";
 
 import { Agent } from "../../src/core/agent.js";
+import type { MessageParam } from "../../src/core/client.js";
 import type { Tool } from "../../src/core/tool.js";
 import { fromOpenAICompletion, OpenAIClient, toOpenAIMessages, toOpenAITool } from "../../src/providers/openai.js";
 import { readTool } from "../../src/tools/read.js";
@@ -95,7 +96,7 @@ test("OpenAI rejects unsupported content instead of silently dropping it", () =>
   assert.throws(() => toOpenAIMessages([{ role: "user", content: [{
     type: "image",
     source: { type: "base64", media_type: "image/png", data: "test" },
-  }] }], "System"), /does not support user content block: image/);
+  }] }] as unknown as MessageParam[], "System"), /does not support user content block: image/);
 });
 
 test("OpenAI normalizes text, usage, and completed function calls", () => {
@@ -140,7 +141,7 @@ test("OpenAI surfaces missing choices and filtered responses", () => {
   assert.throws(() => fromOpenAICompletion(completion("function_call")), /deprecated function_call/);
 });
 
-test("OpenAI streams through the SDK and completes a multi-tool Agent round trip offline", async (context) => {
+test("OpenAI streams through the SDK and completes a multi-tool Agent round trip offline", async () => {
   const requests: ChatCompletionCreateParamsStreaming[] = [];
   const responses = [
     [
@@ -187,18 +188,10 @@ test("OpenAI streams through the SDK and completes a multi-tool Agent round trip
     systemPrompt: "Offline system",
   });
   const output: string[] = [];
-  const originalWrite = process.stdout.write.bind(process.stdout);
-  const write = context.mock.method(process.stdout, "write", (...args: Parameters<typeof process.stdout.write>) => {
-    const [text] = args;
-    if (typeof text !== "string") return originalWrite(...args);
-    output.push(text);
-    return true;
-  });
   const events = [];
-  for await (const event of agent.query("Inspect files")) events.push(event);
-  write.mock.restore();
+  for await (const event of agent.query("Inspect files", { onText: (delta) => output.push(delta) })) events.push(event);
 
-  assert.equal(output.join(""), "Reading files\nSummary\n");
+  assert.equal(output.join(""), "Reading filesSummary");
   assert.deepEqual(executed, [{ path: "one.txt" }, { path: "two.txt" }]);
   assert.equal(requests.length, 2);
   assert.equal(requests[0]?.model, "gpt-4.1-mini");
