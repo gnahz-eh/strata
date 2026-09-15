@@ -156,7 +156,8 @@ A tool still running after cancellation gets up to a two-second settling
 grace period. Pending model, permission, and tool promises are tracked; new
 queries are refused until they settle. After draining or closing the query,
 embedders can inspect `hasPendingOperations` and call `waitForIdle(signal)`.
-The CLI retains its session lock and does not dispose extensions concurrently
+The CLI allows pending SDK/policy operations an additional two-second shutdown
+settling window, then retains its session lock and does not dispose extensions concurrently
 with pending code. Extension cleanup failure also retains the lock. Verify
 process termination before manual recovery. Cancellation and timeouts are not
 rollback, and callers must inspect possible side effects before continuing.

@@ -35,6 +35,15 @@ function childEnvironment(baseURL) {
   };
 }
 
+test("run cancellation awaits SDK settlement before releasing the session lock", { timeout: testTimeout }, async (context) => {
+  const local = await fixture(context, (_request, response) => stalledCompletion(response));
+  const result = await local.run(["--session", "cancel.json", "--timeout", "1", "--json", "-p", "test"]);
+  assert.equal(result.code, 130, result.stderr);
+  ending(result, "aborted");
+  await missing(join(local.directory, "cancel.json.lock"));
+  assert.equal(local.requests.length, 1);
+});
+
 test("stdout storage failures cannot produce a successful CLI exit", { timeout: testTimeout }, async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "strata-output-"));
   context.after(() => rm(directory, { recursive: true, force: true }));

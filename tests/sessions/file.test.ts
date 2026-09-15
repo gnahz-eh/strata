@@ -164,7 +164,7 @@ test("lost ownership refuses saving and closing without removing another owner's
       const session = await FileSession.open(path, identity);
       const original = await fs.readFile(path);
       const lock = await fs.readFile(path + ".lock", "utf8");
-      if (mutation === "removed" || mutation === "replaced-with-same-token") await fs.unlink(path + ".lock");
+      if (mutation === "removed" || mutation === "replaced-with-same-token") await fs.rename(path + ".lock", path + ".displaced-lock");
       if (mutation === "replaced-with-same-token") await fs.writeFile(path + ".lock", lock);
       if (mutation === "changed-token") await fs.writeFile(path + ".lock", JSON.stringify({ ...JSON.parse(lock), token: "foreign-owner" }));
       if (mutation === "malformed") await fs.writeFile(path + ".lock", "foreign malformed lock");
@@ -185,7 +185,7 @@ test("lost ownership refuses saving and closing without removing another owner's
 test("an old session cannot release a new session's lock", async (context) => {
   const { path, identity } = await fixture(context);
   const oldSession = await FileSession.open(path, identity);
-  await fs.unlink(path + ".lock");
+  await fs.rename(path + ".lock", path + ".displaced-lock");
   const newSession = await FileSession.open(path, identity);
   const newLock = await fs.readFile(path + ".lock");
   await assert.rejects(oldSession.close(), /lock ownership/);

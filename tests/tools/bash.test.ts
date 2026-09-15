@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
-import { watch } from "node:fs";
+import { unwatchFile, watchFile } from "node:fs";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -155,13 +155,12 @@ for (const stop of ["abort", "timeout"] as const) {
   test(`bash ${stop} terminates a live child process tree before returning`, { timeout: 20_000 }, async (testContext) => {
     const context = await workspace(testContext);
     const controller = new AbortController();
-    const watcher = watch(context.cwd);
+    const readyPath = join(context.cwd, "ready.json");
     let readyTimer: NodeJS.Timeout;
     const ready = new Promise<void>((resolveReady, rejectReady) => {
       readyTimer = setTimeout(() => rejectReady(new Error("Child readiness deadline exceeded.")), 4000);
-      watcher.on("error", rejectReady);
-      watcher.on("change", (_event, filename) => {
-        if (filename?.toString() === "ready.json") resolveReady();
+      watchFile(readyPath, { interval: 20 }, (current) => {
+        if (current.isFile() && current.size > 0) resolveReady();
       });
     });
     const childSource = `
@@ -193,7 +192,7 @@ for (const stop of ["abort", "timeout"] as const) {
       assert.equal(getEventListeners(controller.signal, "abort").length, 0);
     } finally {
       clearTimeout(readyTimer!);
-      watcher.close();
+      unwatchFile(readyPath);
       controller.abort();
       for (const pid of pids) {
         try {

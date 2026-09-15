@@ -3,6 +3,7 @@ import { mkdir, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { Agent, errorMessage, type StopReason } from "../core/agent.js";
+import { deadline } from "../core/abort.js";
 import { buildSystemPrompt } from "../context/system-prompt.js";
 import { loadExtensions } from "../extensions/index.js";
 import { PermissionManager } from "../permissions/manager.js";
@@ -102,6 +103,11 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
     }
   } finally {
     process.off("SIGINT", onInterrupt);
+    if (agent?.hasPendingOperations) {
+      const settling = deadline(2000);
+      try { await agent.waitForIdle(settling.signal); } catch {}
+      finally { settling.dispose(); }
+    }
     if (agent?.hasPendingOperations) throw new Error("An operation did not stop. Session lock retained; verify the process has exited and inspect side effects before removing the lock. Extension cleanup was not run concurrently with active code.");
     try { await extensions.dispose(); }
     catch (error) {
